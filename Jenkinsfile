@@ -13,7 +13,6 @@ properties([
 ]);
 
 try {
-    testing()
     publishing()
     if (acceptanceTesting()) {
         releasing()
@@ -22,32 +21,6 @@ try {
 } catch (err) {
     notifyingFailure()
     throw err
-}
-
-def testing() {
-    stage('Testing') {
-        parallel([
-                'ubuntu-test' : { ubuntuTesting() },
-                'redhat-test' : { rhelTesting() },
-                'windows-test': { windowsTesting() }
-        ])
-    }
-}
-
-def publishing() {
-    stage('Publishing') {
-        echo "${env.BRANCH_NAME}: start publishing"
-
-        publishedVersions = parallel([
-                //FIXME fix and restore 'rhel-files'     : { rhelPublishing() }, IS-307
-                'ubuntu-files' : { ubuntuPublishing() },
-                'windows-files': { windowsPublishing() },
-        ])
-
-        if (publishedVersions['windows-files'] != publishedVersions['ubuntu-files']) { // FIXME check rhel too, IS-307
-            error "platforms artifacts have different versions"
-        }
-    }
 }
 
 def acceptanceTesting() {
@@ -75,7 +48,7 @@ def releasing() {
 def notifyingSuccess() {
     currentBuild.result = "SUCCESS"
     node('ubuntu-master') {
-        sendNotification.success('indy-sdk')
+        sendNotification.success('sovrin-cli')
     }
 }
 
@@ -86,313 +59,29 @@ def notifyingFailure() {
     }
 }
 
-def getBuildPoolVerOptions(pool_type, plenum_ver, anoncreds_ver, node_ver) {
-    if (pool_type != null && plenum_ver != null && anoncreds_ver != null && node_ver != null) {
-        return "--build-arg=indy_stream=${pool_type} --build-arg indy_plenum_ver=${plenum_ver} --build-arg indy_anoncreds_ver=${anoncreds_ver} --build-arg indy_node_ver=${node_ver}"
-    } else {
-        return ""
-    }
-}
-
-def dockerClean(env_name, network_name) {
-    try {
-        try {
-            sh "docker ps --format '{{.ID}}' --filter network=${network_name} | xargs docker rm -f"
-        } catch (error) {
-            echo "${env_name} Test: error while force clean-up network ${network_name} - ${error}"
-        }
-        try {
-            echo "${env_name} Test: remove pool network ${network_name}"
-            sh "docker network rm ${network_name}"
-        } catch (error) {
-            echo "${env_name} Test: error while delete ${network_name} - ${error}"
-        }
-    }
-    finally {
-        sh "docker container prune -f"
-        sh "docker network prune -f"
-    }
-}
-
-def openPool(env_name, network_name, pool_type = null, pool_ver = null, plenum_ver = null, anoncreds_ver = null, node_ver = null) {
-    echo "${env_name} Test: Clean docker"
-    dockerClean(env_name, network_name)
-
-    echo "${env_name} Test: Create docker network (${network_name}) for nodes pool and test image"
-    sh "docker network create --subnet=10.0.0.0/8 ${network_name}"
-
-    echo "${env_name} Test: Build docker image for nodes pool ver. ${pool_ver}"
-    echo "${env_name} Test: Building nodes pool for versions: plenum ${plenum_ver}, anoncreds ${anoncreds_ver}, node ${node_ver}"
-    verOptions = getBuildPoolVerOptions(pool_type, plenum_ver, anoncreds_ver, node_ver)
-    def poolEnv = dockerHelpers.build("indy_pool_${pool_ver}", 'ci/indy-pool.dockerfile ci',
-            "--build-arg pool_ip=10.0.0.2 ${verOptions}")
-    echo "${env_name} Test: Run nodes pool"
-    return poolEnv.run("--ip=\"10.0.0.2\" --network=${network_name}")
-}
-
-def closePool(env_name, network_name, poolInst) {
-    echo "${env_name} Test: Cleanup"
-    try {
-        echo "${env_name} Test: stop pool"
-        poolInst.stop()
-    } catch (error) {
-        echo "${env_name} Tests: error while stop pool ${error}"
-    }
-    finally {
-        dockerClean(env_name, network_name)
-    }
-    step([$class: 'WsCleanup'])
-}
-
-void getSrcVersion() {
+def getVersion(key) {
     commit = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
-    version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/hyperledger/indy-sdk/$commit/libindy/Cargo.toml -O - | grep -E '^version =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
+    version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/sovrin-foundation/sovrin-cli/$commit/manifest.txt -O - | grep -E '^${key} =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
     return version
 }
 
-def linuxTesting(file, env_name, run_interoperability_tests, network_name, stashBuildResults) {
-    def poolInst
-    try {
-        echo "${env_name} Test: Checkout csm"
-        checkout scm
-
-        poolInst = openPool(env_name, network_name)
-
-        def testEnv
-
-        dir('libindy') {
-            echo "${env_name} Libindy Test: Build docker image"
-            testEnv = dockerHelpers.build('libindy', file)
-
-            testEnv.inside("--ip=\"10.0.0.3\" --network=${network_name}") {
-                echo "${env_name} Test: Test"
-
-                try {
-                    def featuresArgs = ''
-                    if (run_interoperability_tests) {
-                        sh 'chmod -R 777 /home/indy/indy-anoncreds/'
-                        featuresArgs = '--features "interoperability_tests"'
-                    }
-
-                    echo "${env_name} Libindy Test: Build"
-                    sh "RUST_BACKTRACE=1 cargo test --release $featuresArgs --no-run"
-
-                    echo "${env_name} Libindy Test: Run tests"
-                    sh "RUST_BACKTRACE=1 RUST_LOG=trace RUST_TEST_THREADS=1 TEST_POOL_IP=10.0.0.2 cargo test --release $featuresArgs"
-
-                    if (stashBuildResults) {
-                        stash includes: 'target/release/libindy.so,target/release/libindy.a', name: 'LibindyUbuntuBuildResult'
-                    }
-
-                    /* TODO FIXME restore after xunit will be fixed
-                    sh 'RUST_TEST_THREADS=1 cargo test-xunit'
-                    */
-                }
-                finally {
-                    /* TODO FIXME restore after xunit will be fixed
-                    junit 'test-results.xml'
-                    */
-                }
-            }
-        }
-
-        sh "cp libindy/target/release/libindy.so wrappers/java/lib"
-        dir('wrappers/java') {
-            testEnv.inside("--ip=\"10.0.0.3\" --network=${network_name}") {
-                echo "${env_name} Libindy Test: Test java wrapper"
-
-                sh "RUST_LOG=trace TEST_POOL_IP=10.0.0.2 mvn clean test"
-            }
-        }
-
-        sh "cp libindy/target/release/libindy.so wrappers/python"
-        dir('wrappers/python') {
-            testEnv.inside("--ip=\"10.0.0.3\" --network=${network_name}") {
-                echo "${env_name} Libindy Test: Test python wrapper"
-
-                sh '''
-                    python3.5 -m pip install --user -e .
-                    LD_LIBRARY_PATH=./ RUST_LOG=trace TEST_POOL_IP=10.0.0.2 python3.5 -m pytest
-                '''
-            }
-        }
-
-        sh "cp libindy/target/release/libindy.so cli"
-        dir('cli') {
-            testEnv.inside("--ip=\"10.0.0.3\" --network=${network_name}") {
-                echo "${env_name} Indy Cli Test: Build"
-                sh "LIBRARY_PATH=./ RUST_BACKTRACE=1 cargo build --release"
-
-                echo "${env_name} Indy Cli Test: Build Tests"
-                sh "LIBRARY_PATH=./ RUST_BACKTRACE=1 cargo test --release --no-run"
-
-                echo "${env_name} Indy Cli Test: Run tests"
-                sh "LD_LIBRARY_PATH=./ RUST_BACKTRACE=1 RUST_LOG=trace RUST_TEST_THREADS=1 TEST_POOL_IP=10.0.0.2 cargo test --release"
-
-                if (stashBuildResults) {
-                    stash includes: 'target/release/indy-cli', name: 'IndyCliUbuntuBuildResult'
-                }
-            }
-        }
-    }
-    finally {
-        closePool(env_name, network_name, poolInst)
-    }
-}
-
-def windowsTesting() {
-    node('win2016') {
-        stage('Windows Test') {
-            echo "Windows Test: Checkout scm"
-            checkout scm
-
-            try {
-                echo "Windows Test: Run Indy pool"
-                bat "docker -H $INDY_SDK_SERVER_IP build --build-arg pool_ip=$INDY_SDK_SERVER_IP -f ci/indy-pool.dockerfile -t indy_pool ci"
-                bat "docker -H $INDY_SDK_SERVER_IP run -d --network host --name indy_pool -p 9701-9708:9701-9708 indy_pool"
-
-                setupRust()
-
-                dir('libindy') {
-                    echo "Windows Test: Download prebuilt dependencies"
-                    bat 'wget -O prebuilt.zip "https://repo.sovrin.org/windows/libindy/deps/indy-sdk-deps.zip"'
-                    bat 'unzip prebuilt.zip -d prebuilt'
-
-                    echo "Windows Libindy Test: Build"
-                    withEnv([
-                            "INDY_PREBUILT_DEPS_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "INDY_CRYPTO_PREBUILT_DEPS_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "MILAGRO_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "ZMQPW_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "SODIUM_LIB_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "OPENSSL_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "PATH=$WORKSPACE\\libindy\\prebuilt\\lib;$PATH",
-                            "RUST_BACKTRACE=1"
-                    ]) {
-                        bat "cargo test --release --no-run"
-
-                        echo "Windows Libindy Test: Run tests"
-                        withEnv([
-                                "RUST_TEST_THREADS=1",
-                                "RUST_LOG=trace",
-                                "TEST_POOL_IP=$INDY_SDK_SERVER_IP"
-                        ]) {
-                            bat "cargo test --release"
-                        }
-                    }
-                    stash includes: 'target/release/*.dll', name: 'LibindyWindowsBuildResult'
-                }
-
-                dir('cli') {
-                    bat "sed -i -e \"s/10\\.0\\.0\\.2/${INDY_SDK_SERVER_IP}/g\" docker_pool_transactions_genesis"
-
-                    bat "copy $WORKSPACE\\libindy\\target\\release\\indy.dll $WORKSPACE\\libindy\\prebuilt\\lib"
-                    bat "copy $WORKSPACE\\libindy\\target\\release\\indy.lib $WORKSPACE\\libindy\\prebuilt\\lib"
-
-                    echo "Windows Indy Cli Test: Build"
-                    withEnv([
-                            "INDY_DIR=$WORKSPACE\\libindy\\prebuilt",
-                            "RUST_BACKTRACE=1"
-                    ]) {
-                        bat "cargo build --release"
-
-                        echo "Windows Indy Cli Test: Build tests"
-                        bat "cargo test --release --no-run"
-
-                        echo "Windows Indy Cli Test: Run tests"
-                        withEnv([
-                                "RUST_TEST_THREADS=1",
-                                "RUST_LOG=trace",
-                                "TEST_POOL_IP=$INDY_SDK_SERVER_IP"
-                        ]) {
-                            bat "cargo test --release"
-                        }
-                    }
-
-                    stash includes: 'target/release/indy-cli.exe,target/release/*.dll', name: 'IndyCliWindowsBuildResult'
-                }
-
-                //TODO wrappers testing
-
-            } finally {
-                try {
-                    bat "docker -H $INDY_SDK_SERVER_IP stop indy_pool"
-                } catch (ignore) {
-                }
-                try {
-                    bat "docker -H $INDY_SDK_SERVER_IP rm indy_pool"
-                } catch (ignore) {
-                }
-                step([$class: 'WsCleanup'])
-            }
-        }
-    }
-}
-
-def ubuntuTesting() {
-    node('ubuntu') {
-        stage('Ubuntu Test') {
-            linuxTesting("ci/ubuntu.dockerfile ci", "Ubuntu", false, "pool_network", true)
-        }
-    }
-}
-
-def rhelTesting() {
-    node('ubuntu') {
-        stage('RedHat Test') {
-            linuxTesting("ci/amazon.dockerfile ci", "RedHat", false, "pool_network", false)
-        }
-    }
-}
-
-def rhelPublishing() {
-    node('ubuntu') {
-        stage('Publish Libindy RPM Files') {
-            try {
-                echo 'Publish Rpm files: Checkout csm'
-                checkout scm
-
-                version = getSrcVersion()
-
-                dir('libindy') {
-                    echo 'Publish Rpm: Build docker image'
-                    def testEnv = dockerHelpers.build('indy-sdk', 'ci/amazon.dockerfile ci')
-
-                    testEnv.inside('-u 0:0') {
-
-                        sh 'chmod -R 777 ci'
-
-                        withCredentials([file(credentialsId: 'EvernymRepoSSHKey', variable: 'repo_key')]) {
-                            sh "./ci/libindy-rpm-build-and-upload.sh $version $repo_key $env.BRANCH_NAME $env.BUILD_NUMBER"
-                        }
-                    }
-                }
-            }
-            finally {
-                echo 'Publish RPM: Cleanup'
-                step([$class: 'WsCleanup'])
-            }
-        }
-    }
-    return version
-}
-
-def ubuntuPublishing() {
+def publishing() {
     node('ubuntu') {
         stage('Publish Ubuntu Files') {
             try {
                 echo 'Publish Ubuntu files: Checkout csm'
                 checkout scm
 
-                version = getSrcVersion()
+                version = getVersion("version")
+                genesisVersion = getVersion("genesis-version")
+                indyCliVersion = getVersion("indy-cli-version")
 
                 echo 'Publish Ubuntu files: Build docker image'
-                testEnv = dockerHelpers.build('indy-sdk', 'libindy/ci/ubuntu.dockerfile libindy/ci')
+                testEnv = dockerHelpers.build('indy-sdk', 'libindy/ci/ubuntu.dockerfile libindy/ci',
+                        "--build-arg genesis-version=${genesisVersion}")
 
-                libindyDebPublishing(testEnv)
-                pythonWrapperPublishing(testEnv, false)
-                javaWrapperPublishing(testEnv, false)
-                libindyCliDebPublishing(testEnv)
+                sovrinCliDebPublishing(testEnv)
+                sovrinCliWinPublishing(testEnv, version, indyCliVersion)
             }
             finally {
                 echo 'Publish Ubuntu files: Cleanup'
@@ -404,125 +93,34 @@ def ubuntuPublishing() {
     return version
 }
 
-def windowsPublishing() {
-    node('win2016') {
-        stage('Publish Libindy Windows Files') {
-            try {
-                echo 'Publish Windows files: Checkout csm'
-                checkout scm
+def sovrinCliWinPublishing(testEnv, version, indyCliVersion) {
+    shortIndyCliVer = indyCliVersion.split('-')[0]
+    type = $env.BRANCH_NAME
+    number = $env.BUILD_NUMBER
 
-                version = getSrcVersion()
-
-                dir('libindy') {
-                    echo 'Publish Libindy Windows files'
-
-                    unstash name: 'LibindyWindowsBuildResult'
-
-                    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'repo_key')]) {
-                        sh "./ci/libindy-win-zip-and-upload.sh $version '${repo_key}' $env.BRANCH_NAME $env.BUILD_NUMBER"
-                    }
-                }
-
-                dir('cli') {
-                    echo 'Publish Indy Cli Windows files'
-
-                    unstash name: 'IndyCliWindowsBuildResult'
-
-                    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'repo_key')]) {
-                        sh "./ci/indy-cli-win-zip-and-upload.sh $version '${repo_key}' $env.BRANCH_NAME $env.BUILD_NUMBER"
-                    }
-                }
-            }
-            finally {
-                echo 'Publish Windows files: Cleanup'
-                step([$class: 'WsCleanup'])
-            }
-        }
-    }
-    return version
-}
-
-def getSuffix(isRelease, target) {
-    def suffix
-    if (env.BRANCH_NAME == 'master' && !isRelease) {
-        suffix = "-dev-$env.BUILD_NUMBER"
-    } else if (env.BRANCH_NAME == 'rc') {
-        if (isRelease) {
-            suffix = ""
-        } else {
-            suffix = "-rc-$env.BUILD_NUMBER"
-        }
-    } else {
-        error "Publish To ${target}: invalid case: branch ${env.BRANCH_NAME}, isRelease ${isRelease}"
-    }
-    return suffix
-}
-
-def libindyDebPublishing(testEnv) {
-    echo 'Publish Libindy deb files to Apt'
-
-    dir('libindy/sovrin-packaging') {
-        downloadPackagingUtils()
-    }
+    out_zip_name = "sovrin-cli_${version}.zip"
 
     testEnv.inside {
-        sh 'chmod -R 755 libindy/ci/*.sh'
+        sh '''
+            wget https://repo.sovrin.org/windows/indy-cli/master/${indyCliVersion}/indy-cli_${shortIndyCliVer}.zip -O indy-cli.zip
+            unzip indy-cli.zip -d sovrin-cli
+            cp sovrin-cli-init-default-networks.bat sovrin-cli/
+            cp /etc/sovrin/pool_transactions_live_genesis sovrin-cli/
+            cp /etc/sovrin/pool_transactions_sandbox_genesis sovrin-cli/
+            zip -j -l $out_zip_name sovrin-cli/*
+        '''
 
-        def suffix = "~$env.BUILD_NUMBER"
+        targetRemoteDir = "/var/repository/repos/windows/sovrin-cli/$type/$version-$number"
 
-        unstash name: 'LibindyUbuntuBuildResult'
-        sh 'mkdir --parent libindy/target/release/ && mv target/release/* libindy/target/release/'
-
-        withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_key')]) {
-            sh "cd libindy && ./ci/libindy-deb-build-and-upload.sh $version $env.BRANCH_NAME $suffix $SOVRIN_SDK_REPO_NAME $SOVRIN_REPO_HOST $sovrin_key"
-
-            if (env.BRANCH_NAME == 'rc') {
-                stash includes: 'libindy/debs/*', name: 'libindyDebs'
-            }
-        }
+        sovrinSSH("mkdir -p $targetRemoteDir")
+        sovrinSCP("$out_zip_name", targetRemoteDir)
     }
 }
 
-def pythonWrapperPublishing(testEnv, isRelease) {
-    dir('wrappers/python') {
-        def suffix = getSuffix(isRelease, "Pypi")
-
-        testEnv.inside {
-            withCredentials([file(credentialsId: 'pypi_credentials', variable: 'credentialsFile')]) {
-                sh 'cp $credentialsFile ./'
-                sh "sed -i -E \"s/version='([0-9,.]+).*/version='\\1$suffix',/\" setup.py"
-                sh '''
-                    python3.5 setup.py sdist
-                    python3.5 -m twine upload dist/* --config-file .pypirc
-                '''
-            }
-        }
-    }
-}
-
-def javaWrapperPublishing(testEnv, isRelease) {
-    dir('wrappers/java') {
-        echo "Publish To Maven Test: Build docker image"
-        def suffix = getSuffix(isRelease, "Maven")
-
-        testEnv.inside {
-            echo "Publish To Maven Test: Test"
-
-            sh "sed -i -E -e 'H;1h;\$!d;x' -e \"s/<version>([0-9,.]+)</<version>\\1$suffix</\" pom.xml"
-
-            withCredentials([file(credentialsId: 'artifactory-evernym-settings', variable: 'settingsFile')]) {
-                sh 'cp $settingsFile .'
-
-                sh "mvn clean deploy -DskipTests --settings settings.xml"
-            }
-        }
-    }
-}
-
-def libindyCliDebPublishing(testEnv) {
+def sovrinCliDebPublishing(testEnv) {
     echo 'Publish Indy Cli deb files to Apt'
 
-    dir('cli/sovrin-packaging') {
+    dir('sovrin-packaging') {
         downloadPackagingUtils()
     }
 
@@ -553,20 +151,8 @@ def publishingRCtoStable() {
 
                 version = getSrcVersion()
 
-                echo 'Moving Windows RC artifacts to Stable: libindy'
-                publishLibindyWindowsFilesRCtoStable(version)
-
                 echo 'Moving RC artifacts to Stable: Build docker image for wrappers publishing'
                 testEnv = dockerHelpers.build('indy-sdk', 'libindy/ci/ubuntu.dockerfile libindy/ci')
-
-                echo 'Moving Ubuntu RC artifacts to Stable: libindy'
-                publishLibindyDebRCtoStable(testEnv, version)
-
-                echo 'Moving Ubuntu RC artifacts to Stable: python wrapper'
-                pythonWrapperPublishing(testEnv, true)
-
-                echo 'Moving Ubuntu RC artifacts to Stable: java wrapper'
-                javaWrapperPublishing(testEnv, true)
 
                 echo 'Moving Ubuntu RC artifacts to Stable: indy-cli'
                 publishLibindyCliDebRCtoStable(testEnv, version)
@@ -581,39 +167,12 @@ def publishingRCtoStable() {
     }
 }
 
-def publishLibindyWindowsFilesRCtoStable(version) {
-    rcFullVersion = "${version}-${env.BUILD_NUMBER}"
-    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_repo_key')]) {
-        src = "/var/repository/repos/windows/libindy/rc/$rcFullVersion/"
-        target = "/var/repository/repos/windows/libindy/stable/$version"
-
-        sh "ssh -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' repo@192.168.11.115 '! ls $target'"
-        sh "ssh -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' repo@192.168.11.115 cp -r $src $target"
-    }
-}
-
 def publishLibindyCliWindowsFilesRCtoStable(version) {
     rcFullVersion = "${version}-${env.BUILD_NUMBER}"
-    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_repo_key')]) {
-        src = "/var/repository/repos/windows/indy-cli/rc/$rcFullVersion/"
-        target = "/var/repository/repos/windows/indy-cli/stable/$version"
-
-        sh "ssh -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' repo@192.168.11.115 '! ls $target'"
-        sh "ssh -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' repo@192.168.11.115 cp -r $src $target"
-    }
-}
-
-def publishLibindyDebRCtoStable(testEnv, version) {
-    testEnv.inside {
-        rcFullVersion = "${version}~${env.BUILD_NUMBER}"
-
-        unstash name: 'libindyDebs'
-
-        sh "fakeroot deb-reversion -v $version libindy/debs/libindy_\"$rcFullVersion\"_amd64.deb"
-        sh "fakeroot deb-reversion -v $version libindy/debs/libindy-dev_\"$rcFullVersion\"_amd64.deb"
-
-        uploadDebianFilesToStable()
-    }
+    src = "/var/repository/repos/windows/sovrin-cli/rc/$rcFullVersion/"
+    target = "/var/repository/repos/windows/sovrin-cli/stable/$version"
+    sovrinSSH("! ls $target")
+    sovrinSSH("cp -r $src $target")
 }
 
 def publishLibindyCliDebRCtoStable(testEnv, version) {
@@ -641,6 +200,14 @@ def downloadPackagingUtils() {
     git branch: 'master', credentialsId: 'evernym-github-machine-user', url: 'https://github.com/evernym/sovrin-packaging'
 }
 
-def setupRust() {
-    sh "rustup default 1.21.0"
+def sovrinSSH(cmd) {
+    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_repo_key')]) {
+        sh "ssh -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' repo@192.168.11.115 '$cmd'"
+    }
+}
+
+def sovrinSCP(from, toServer) {
+    withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_repo_key')]) {
+        sh "scp -v -oStrictHostKeyChecking=no -i '$sovrin_repo_key' $from repo@192.168.11.115:$toServer"
+    }
 }
