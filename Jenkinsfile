@@ -64,7 +64,8 @@ def notifyingFailure() {
 
 def getVersion(key) {
     commit = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
-    version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/sovrin-foundation/sovrin-cli/$commit/manifest.txt -O - | grep -E '^${key} =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
+    //FIXME repo
+    version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/jovfer/sovrin-cli/$commit/manifest.txt -O - | grep -E '^${key} =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
     return version
 }
 
@@ -83,7 +84,7 @@ def publishing() {
                 testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci/',
                         "--build-arg genesis-version=${genesisVersion}")
 
-                sovrinCliDebPublishing(testEnv)
+                sovrinCliDebPublishing(testEnv, version)
                 sovrinCliWinPublishing(testEnv, version, indyCliVersion)
             }
             finally {
@@ -98,14 +99,15 @@ def publishing() {
 
 def sovrinCliWinPublishing(testEnv, version, indyCliVersion) {
     shortIndyCliVer = indyCliVersion.split('-')[0]
-    type = $env.BRANCH_NAME
-    number = $env.BUILD_NUMBER
+    type = env.BRANCH_NAME
+    number = env.BUILD_NUMBER
 
     out_zip_name = "sovrin-cli_${version}.zip"
 
     testEnv.inside {
+
+        sh "wget https://repo.sovrin.org/windows/indy-cli/master/${indyCliVersion}/indy-cli_${shortIndyCliVer}.zip -O indy-cli.zip"
         sh '''
-            wget https://repo.sovrin.org/windows/indy-cli/master/${indyCliVersion}/indy-cli_${shortIndyCliVer}.zip -O indy-cli.zip
             unzip indy-cli.zip -d sovrin-cli
             cp sovrin-cli-init-default-networks.bat sovrin-cli/
             cp /etc/sovrin/pool_transactions_live_genesis sovrin-cli/
@@ -120,7 +122,7 @@ def sovrinCliWinPublishing(testEnv, version, indyCliVersion) {
     }
 }
 
-def sovrinCliDebPublishing(testEnv) {
+def sovrinCliDebPublishing(testEnv, version) {
     echo 'Publish Indy Cli deb files to Apt'
 
     dir('ci/sovrin-packaging') {
@@ -128,20 +130,15 @@ def sovrinCliDebPublishing(testEnv) {
     }
 
     testEnv.inside {
-        sh 'chmod -R 755 cli/ci/*.sh'
-
         def suffix = "~$env.BUILD_NUMBER"
 
-        unstash name: 'IndyCliUbuntuBuildResult'
         sh 'cp sovrin-cli-init-default-networks.sh ci/sovrin-cli-init-default-networks'
 
         withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_key')]) {
-            dir('ci') {
-                sh "./sovrin-cli-deb-build-and-upload.sh $version $env.BRANCH_NAME $suffix $SOVRIN_SDK_REPO_NAME $SOVRIN_REPO_HOST $sovrin_key"
+            sh "cd ci && ./sovrin-cli-deb-build-and-upload.sh $version $env.BRANCH_NAME $suffix $SOVRIN_SDK_REPO_NAME $SOVRIN_REPO_HOST '$sovrin_key'"
 
-                if (env.BRANCH_NAME == 'rc') {
-                    stash includes: './debs/*', name: 'sovrinCliDebs'
-                }
+            if (env.BRANCH_NAME == 'rc') {
+                stash includes: './debs/*', name: 'sovrinCliDebs'
             }
         }
     }
