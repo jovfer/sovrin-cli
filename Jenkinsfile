@@ -120,7 +120,7 @@ def sovrinCliWinPublishing(testEnv, version, indyCliVersion) {
 def sovrinCliDebPublishing(testEnv) {
     echo 'Publish Indy Cli deb files to Apt'
 
-    dir('sovrin-packaging') {
+    dir('ci/sovrin-packaging') {
         downloadPackagingUtils()
     }
 
@@ -130,13 +130,15 @@ def sovrinCliDebPublishing(testEnv) {
         def suffix = "~$env.BUILD_NUMBER"
 
         unstash name: 'IndyCliUbuntuBuildResult'
-        sh 'mkdir --parent cli/target/release/ && mv target/release/* cli/target/release/'
+        sh 'cp sovrin-cli-init-default-networks.sh ci/sovrin-cli-init-default-networks'
 
         withCredentials([file(credentialsId: 'SovrinRepoSSHKey', variable: 'sovrin_key')]) {
-            sh "cd cli && ./ci/indy-cli-deb-build-and-upload.sh $version $env.BRANCH_NAME $suffix $SOVRIN_SDK_REPO_NAME $SOVRIN_REPO_HOST $sovrin_key"
+            dir('ci') {
+                sh "./sovrin-cli-deb-build-and-upload.sh $version $env.BRANCH_NAME $suffix $SOVRIN_SDK_REPO_NAME $SOVRIN_REPO_HOST $sovrin_key"
 
-            if (env.BRANCH_NAME == 'rc') {
-                stash includes: 'cli/debs/*', name: 'libindyCliDebs'
+                if (env.BRANCH_NAME == 'rc') {
+                    stash includes: './debs/*', name: 'sovrinCliDebs'
+                }
             }
         }
     }
@@ -179,9 +181,9 @@ def publishLibindyCliDebRCtoStable(testEnv, version) {
     testEnv.inside {
         rcFullVersion = "${version}~${env.BUILD_NUMBER}"
 
-        unstash name: 'libindyCliDebs'
+        unstash name: 'sovrinCliDebs'
 
-        sh "fakeroot deb-reversion -v $version cli/debs/indy-cli_\"$rcFullVersion\"_amd64.deb"
+        sh "fakeroot deb-reversion -v $version ./debs/sovrin-cli_\"$rcFullVersion\"_amd64.deb"
 
         uploadDebianFilesToStable()
     }
