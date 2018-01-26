@@ -12,6 +12,9 @@ properties([
         ]]
 ]);
 
+env.SOVRIN_CORE_REPO_NAME = 'test' //FIXME rm test line
+env.SOVRIN_SDK_REPO_NAME = 'test' //FIXME rm test line
+
 try {
     publishing()
     if (acceptanceTesting()) {
