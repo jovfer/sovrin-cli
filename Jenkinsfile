@@ -80,7 +80,7 @@ def publishing() {
                 indyCliVersion = getVersion("indy-cli-version")
 
                 echo 'Publish Ubuntu files: Build docker image'
-                testEnv = dockerHelpers.build('indy-sdk', 'libindy/ci/ubuntu.dockerfile libindy/ci',
+                testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci/',
                         "--build-arg genesis-version=${genesisVersion}")
 
                 sovrinCliDebPublishing(testEnv)
@@ -157,7 +157,7 @@ def publishingRCtoStable() {
                 version = getSrcVersion()
 
                 echo 'Moving RC artifacts to Stable: Build docker image for wrappers publishing'
-                testEnv = dockerHelpers.build('indy-sdk', 'libindy/ci/ubuntu.dockerfile libindy/ci')
+                testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci')
 
                 echo 'Moving Ubuntu RC artifacts to Stable: indy-cli'
                 publishLibindyCliDebRCtoStable(testEnv, version)
