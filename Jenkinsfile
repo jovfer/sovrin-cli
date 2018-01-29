@@ -82,7 +82,7 @@ def publishing() {
 
                 echo 'Publish Ubuntu files: Build docker image'
                 testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci/',
-                        "--build-arg genesis-version=${genesisVersion}")
+                        "--build-arg genesis_version=${genesisVersion} --build-arg indy_cli_version=${indyCliVersion}")
 
                 sovrinCliDebPublishing(testEnv, version)
                 sovrinCliWinPublishing(testEnv, version, indyCliVersion)
