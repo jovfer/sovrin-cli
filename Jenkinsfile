@@ -63,10 +63,10 @@ def notifyingFailure() {
 }
 
 def getVersion(key) {
-    commit = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+    _commit = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
     //FIXME repo
-    version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/jovfer/sovrin-cli/$commit/manifest.txt -O - | grep -E '^${key} =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
-    return version
+    _version = sh(returnStdout: true, script: "wget -q https://raw.githubusercontent.com/jovfer/sovrin-cli/$_commit/manifest.txt -O - | grep -E '^${key} =' | head -n1 | cut -f2 -d= | cut -f2 -d '\"'").trim()
+    return _version
 }
 
 def publishing() {
@@ -79,13 +79,16 @@ def publishing() {
                 version = getVersion("version")
                 genesisVersion = getVersion("genesis-version")
                 indyCliVersion = getVersion("indy-cli-version")
+                shortIndyCliVer = indyCliVersion.split('~')[0]
+
+                echo "Parsed versions: self $version, genesis $genesisVersion, indy CLI $shortIndyCliVer ($indyCliVersion)"
 
                 echo 'Publish Ubuntu files: Build docker image'
                 testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci/',
                         "--build-arg genesis_version=${genesisVersion} --build-arg indy_cli_version=${indyCliVersion}")
 
                 sovrinCliDebPublishing(testEnv, version)
-                sovrinCliWinPublishing(testEnv, version, indyCliVersion)
+                sovrinCliWinPublishing(testEnv, version, indyCliVersion, shortIndyCliVer)
             }
             finally {
                 echo 'Publish Ubuntu files: Cleanup'
@@ -97,23 +100,26 @@ def publishing() {
     return version
 }
 
-def sovrinCliWinPublishing(testEnv, version, indyCliVersion) {
-    shortIndyCliVer = indyCliVersion.split('-')[0]
+def sovrinCliWinPublishing(testEnv, version, indyCliVersion, shortIndyCliVer) {
     type = env.BRANCH_NAME
     number = env.BUILD_NUMBER
+
+    indyCliDirVersion = indyCliVersion.replace('~', '-')
 
     out_zip_name = "sovrin-cli_${version}.zip"
 
     testEnv.inside {
 
-        sh "wget https://repo.sovrin.org/windows/indy-cli/master/${indyCliVersion}/indy-cli_${shortIndyCliVer}.zip -O indy-cli.zip"
+        //FIXME stable
+        sh "wget https://repo.sovrin.org/windows/indy-cli/master/${indyCliDirVersion}/indy-cli_${shortIndyCliVer}.zip -O indy-cli.zip"
         sh '''
             unzip indy-cli.zip -d sovrin-cli
+            cp manifest.txt sovrin-cli/
             cp sovrin-cli-init-default-networks.bat sovrin-cli/
             cp /etc/sovrin/pool_transactions_live_genesis sovrin-cli/
             cp /etc/sovrin/pool_transactions_sandbox_genesis sovrin-cli/
-            zip -j -l $out_zip_name sovrin-cli/*
         '''
+        sh "zip -j -l $out_zip_name sovrin-cli/*"
 
         targetRemoteDir = "/var/repository/repos/windows/sovrin-cli/$type/$version-$number"
 
@@ -154,7 +160,8 @@ def publishingRCtoStable() {
                 version = getSrcVersion()
 
                 echo 'Moving RC artifacts to Stable: Build docker image for wrappers publishing'
-                testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci')
+                testEnv = dockerHelpers.build('sovrin-cli', 'ci/ubuntu.dockerfile ci/',
+                        "--build-arg genesis_version=${genesisVersion} --build-arg indy_cli_version=${indyCliVersion}")
 
                 echo 'Moving Ubuntu RC artifacts to Stable: indy-cli'
                 publishLibindyCliDebRCtoStable(testEnv, version)
